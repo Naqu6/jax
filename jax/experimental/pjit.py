@@ -378,6 +378,11 @@ class ParsedPartitionSpec:
       else:
         axis_spec = (axis_spec,)
       axis_specs.append(axis_spec)
+
+    # Strip trailing empty tuple to canonicalize axis_specs.
+    while axis_specs and axis_specs[-1] == ():
+      axis_specs.pop()
+
     return cls(entry, axis_specs)
 
   def __hash__(self):
@@ -385,7 +390,6 @@ class ParsedPartitionSpec:
 
   def __eq__(self, other):
     return (self.partitions == other.partitions and
-            self.unsafe_user_spec == other.unsafe_user_spec and
             self.sync == other.sync)
 
   def __len__(self):
@@ -398,8 +402,9 @@ class ParsedPartitionSpec:
     return iter(self.partitions)
 
   def __repr__(self):
-    return f"<partitions={self.partitions} sync={self.sync}>"
-
+    return (f"ParsedPartitionSpec(partitions={self.partitions}, "
+            f"unsafe_user_spec={self.unsafe_user_spec}, "
+            f"sync={self.sync})")
 
 REPLICATED = ParsedPartitionSpec(None, ())
 
@@ -895,9 +900,10 @@ def _canonicalize_spec(in_axis_resources_flat: ParsedPartitionSpec, arg):
     if in_axis_resources_flat is not FROM_GDA and in_axis_resources_flat != gsda_ppspec:
       raise ValueError(
           'Got an input GDA to pjit with different partitioning than specified in '
-          'the in_axis_resources argument to pjit. The paritioning must match, or '
+          "the in_axis_resources argument to pjit. The partitioning must match, or "
           "use `jax.experimental.pjit.FROM_GDA` in `in_axis_resources`. "
-          f'Got GDA spec: {gsda_ppspec}, pjit spec: {in_axis_resources_flat}')
+          f"Got GDA spec: {gsda_ppspec.user_spec} and "
+          f"pjit spec: {in_axis_resources_flat.user_spec} for GDA: {arg}")
     return gsda_ppspec
   return in_axis_resources_flat
 

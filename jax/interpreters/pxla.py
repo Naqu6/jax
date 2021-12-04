@@ -1888,7 +1888,8 @@ def lower_mesh_computation(
     donated_invars: Sequence[bool],
     spmd_lowering: bool,
     global_in_avals: Sequence[core.ShapedArray],
-    tile_by_mesh_axes: bool):
+    tile_by_mesh_axes: bool,
+    is_gda: Sequence[bool]):
   assert not mesh.empty
   backend = xb.get_device_backend(mesh.devices.flat[0])
 
@@ -1971,7 +1972,7 @@ def lower_mesh_computation(
 
   return MeshComputation(
       module, donated_invars, mesh, global_in_avals, global_out_avals,
-      in_axes, out_axes, spmd_lowering, tuple_args)
+      in_axes, out_axes, spmd_lowering, tuple_args, is_gda)
 
 
 class MeshComputation:
@@ -1995,8 +1996,10 @@ class MeshComputation:
           _allow_compile_replicated=_allow_compile_replicated)  # type: ignore
     return self._executable
 
-def _get_input_specs_and_indices(global_in_avals, mesh, in_axes):
-  if config.jax_gsda_out:
+def _get_input_specs_and_indices(global_in_avals, mesh, in_axes, is_gda):
+  # If all inputs are GDAs, then the mesh can be non-contiguous. Checking the
+  # avals doesn't help here because all avals are already global.
+  if all(is_gda):
     input_specs = [mesh_sharding_specs(mesh.shape, mesh.axis_names)(aval, aval_in_axes)
                    if aval is not core.abstract_unit else None
                    for aval, aval_in_axes in safe_zip(global_in_avals, in_axes)]
@@ -2037,6 +2040,7 @@ class MeshExecutable:
                in_axes: Sequence[ArrayMapping],
                out_axes: Sequence[ArrayMapping],
                spmd_lowering: bool, tuple_args: bool,
+               is_gda: Sequence[bool],
                _allow_propagation_to_outputs: bool,
                _allow_compile_replicated: bool):
     assert not mesh.empty
@@ -2058,7 +2062,7 @@ class MeshExecutable:
         _allow_propagation_to_outputs
 
     input_specs, input_indices = _get_input_specs_and_indices(
-        global_in_avals, mesh, in_axes)
+        global_in_avals, mesh, in_axes, is_gda)
     # Calculate local information here instead of calculating it in
     # `avals_to_results_handler` because pmap also uses this function.
     handle_outs = global_avals_to_results_handler(global_out_avals, out_axes, mesh)

@@ -2595,7 +2595,8 @@ def _pjit(*args: TfVal,
           in_positional_semantics,
           out_positional_semantics,
           _in_avals: Sequence[core.ShapedArray],
-          _out_aval: core.ShapedArray) -> TfVal:
+          _out_aval: core.ShapedArray,
+          is_gda: Sequence[bool]) -> TfVal:
   del donated_invars
   if resource_env.physical_mesh.is_multi_process:
     raise NotImplementedError("jax2tf translation for pjit over multi-process "

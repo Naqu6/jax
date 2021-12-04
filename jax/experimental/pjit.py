@@ -222,13 +222,13 @@ def pjit(fun: Callable,
         maps._PositionalSemantics.GLOBAL if type(a) is GDA else maps
         ._positional_semantics for a in args_flat)
     out_positional_semantics = maps._positional_semantics
+    is_gda = tuple(type(a) is GDA for a in args_flat)
     jaxpr, in_axis_resources_flat, out_axis_resources_flat = _pjit_jaxpr(
         flat_fun, mesh, local_in_avals, in_tree,
         hashable_pytree(in_axis_resources),
         HashableFunction(out_tree, closure=()),
         hashable_pytree(out_axis_resources),
-        in_positional_semantics, out_positional_semantics,
-        tuple(isinstance(a, GDA) for a in args_flat))
+        in_positional_semantics, out_positional_semantics, is_gda)
     in_axis_resources_flat = tree_map(_canonicalize_spec, in_axis_resources_flat,
                                       tuple(args_flat))
     params = dict(
@@ -239,7 +239,8 @@ def pjit(fun: Callable,
         donated_invars=donated_invars,
         name=flat_fun.__name__,
         in_positional_semantics=in_positional_semantics,
-        out_positional_semantics=out_positional_semantics)
+        out_positional_semantics=out_positional_semantics,
+        is_gda=is_gda)
     return args_flat, params, in_tree, out_tree(), donate_argnums
 
   @wraps(fun)
@@ -257,7 +258,8 @@ def pjit(fun: Callable,
         params['jaxpr'], params['in_axis_resources'],
         params['out_axis_resources'], params['resource_env'],
         params['donated_invars'], params['name'],
-        params['in_positional_semantics'], params['out_positional_semantics'])
+        params['in_positional_semantics'], params['out_positional_semantics'],
+        params['is_gda'])
     return Lowered(lowering, in_tree, out_tree, donate_argnums, no_kwargs=True)
 
   wrapped.lower = lower
@@ -467,11 +469,11 @@ pjit_p.multiple_results = True
 def _pjit_call_impl(*args, jaxpr,
                     in_axis_resources, out_axis_resources,
                     resource_env, donated_invars, name,
-                    in_positional_semantics, out_positional_semantics):
+                    in_positional_semantics, out_positional_semantics, is_gda):
   compiled = _pjit_lower(
       jaxpr, in_axis_resources, out_axis_resources,
       resource_env, donated_invars, name, in_positional_semantics,
-      out_positional_semantics).compile()
+      out_positional_semantics, is_gda).compile()
   distributed_debug_log(("Running pjit'd function", name),
                         ("mesh", resource_env.physical_mesh))
   return compiled.unsafe_call(*args)
@@ -485,7 +487,7 @@ def _pjit_lower(
     resource_env,
     donated_invars,
     name: str,
-    in_positional_semantics, out_positional_semantics):
+    in_positional_semantics, out_positional_semantics, is_gda):
   in_axes = [get_array_mapping(axes) for axes in in_axis_resources]
   out_axes = [get_array_mapping(axes) for axes in out_axis_resources]
   pxla.resource_typecheck(jaxpr, resource_env, {}, lambda: "pjit")
@@ -495,7 +497,7 @@ def _pjit_lower(
   return pxla.lower_mesh_computation(
       fun, name, resource_env.physical_mesh,
       in_axes, out_axes, donated_invars,
-      True, jaxpr.in_avals, tile_by_mesh_axes=False)
+      True, jaxpr.in_avals, tile_by_mesh_axes=False, is_gda=is_gda)
 
 
 def _pjit_abstract_eval(*args, jaxpr, out_axis_resources, resource_env,
@@ -508,7 +510,7 @@ pjit_p.def_abstract_eval(_pjit_abstract_eval)
 def _pjit_translation_rule(ctx, avals_in, avals_out, *in_nodes, name,
                            jaxpr, in_axis_resources, out_axis_resources,
                            resource_env, donated_invars, in_positional_semantics,
-                           out_positional_semantics):
+                           out_positional_semantics, is_gda):
   mesh = resource_env.physical_mesh
   subc = xc.XlaBuilder(f"pjit_{name}")
 
@@ -546,7 +548,7 @@ def _pjit_batcher(insert_axis,
                   vals_in, dims_in,
                   jaxpr, in_axis_resources, out_axis_resources,
                   resource_env, donated_invars, name, in_positional_semantics,
-                  out_positional_semantics):
+                  out_positional_semantics, is_gda):
   # batch_jaxpr expects all batching dimensions to be equal to 0
   vals_in = [batching.moveaxis(x, d, 0) if d is not batching.not_mapped and d != 0
              else x for x, d in zip(vals_in, dims_in)]
@@ -571,7 +573,8 @@ def _pjit_batcher(insert_axis,
     donated_invars=donated_invars,
     name=name,
     in_positional_semantics=in_positional_semantics,
-    out_positional_semantics=out_positional_semantics)
+    out_positional_semantics=out_positional_semantics,
+    is_gda=is_gda)
   dims_out = [0 if batched else batching.not_mapped for batched in is_mapped_out]
   return vals_out, dims_out
 batching.axis_primitive_batchers[pjit_p] = partial(_pjit_batcher, False)
@@ -581,7 +584,7 @@ pxla.spmd_primitive_batchers[pjit_p] = partial(_pjit_batcher, True)
 def _pjit_jvp(primals_in, tangents_in,
               jaxpr, in_axis_resources, out_axis_resources,
               resource_env, donated_invars, name, in_positional_semantics,
-              out_positional_semantics):
+              out_positional_semantics, is_gda):
   is_nz_tangents_in = [type(t) is not ad.Zero for t in tangents_in]
   jaxpr_jvp, is_nz_tangents_out = ad.jvp_jaxpr(
       jaxpr, is_nz_tangents_in, instantiate=False)
@@ -599,7 +602,8 @@ def _pjit_jvp(primals_in, tangents_in,
       donated_invars=(*donated_invars, *_filter_zeros_in(donated_invars)),
       name=wrap_name(name, 'jvp'),
       in_positional_semantics=(*in_positional_semantics, *_filter_zeros_in(in_positional_semantics)),
-      out_positional_semantics=out_positional_semantics)
+      out_positional_semantics=out_positional_semantics,
+      is_gda=is_gda)
 
   primals_out, tangents_out = split_list(outputs, [len(jaxpr.jaxpr.outvars)])
   assert len(primals_out) == len(jaxpr.jaxpr.outvars)
@@ -612,7 +616,7 @@ ad.primitive_jvps[pjit_p] = _pjit_jvp
 def _pjit_partial_eval(trace, *in_tracers,
                        jaxpr, in_axis_resources, out_axis_resources,
                        resource_env, donated_invars, name, in_positional_semantics,
-                       out_positional_semantics):
+                       out_positional_semantics, is_gda):
   # XXX: At the moment all residuals get fully replicated, which is extremely
   #      wasteful and might quickly lead to OOM errors.
   mesh = resource_env.physical_mesh
@@ -645,7 +649,8 @@ def _pjit_partial_eval(trace, *in_tracers,
       donated_invars=keep_where(donated_invars, known_ins),
       name=name,
       in_positional_semantics=keep_where(in_positional_semantics, known_ins),
-      out_positional_semantics=out_positional_semantics)
+      out_positional_semantics=out_positional_semantics,
+      is_gda=is_gda)
 
   if num_residuals:
     executable = _pjit_lower(**known_params).compile(
@@ -686,7 +691,8 @@ def _pjit_partial_eval(trace, *in_tracers,
       name=name,
       in_positional_semantics=(keep_where(
           in_positional_semantics, unknown_ins) + (out_positional_semantics,) * num_residuals),
-      out_positional_semantics=out_positional_semantics)
+      out_positional_semantics=out_positional_semantics,
+      is_gda=is_gda)
   unknown_tracers_in = [t for t in in_tracers if not t.pval.is_known()]
   unknown_tracers_out = [
       pe.JaxprTracer(trace, pe.PartialVal.unknown(aval), None)
@@ -707,7 +713,7 @@ pe.custom_partial_eval_rules[pjit_p] = _pjit_partial_eval
 def _pjit_transpose(reduce_axes, cts_in, *primals_in,
                     jaxpr, in_axis_resources, out_axis_resources,
                     resource_env, donated_invars, name, in_positional_semantics,
-                    out_positional_semantics):
+                    out_positional_semantics, is_gda):
   mesh = resource_env.physical_mesh
 
   def prune_type(ty, xs, maybe_zeros):
@@ -751,7 +757,8 @@ def _pjit_transpose(reduce_axes, cts_in, *primals_in,
       donated_invars=(False,) * len(primals_and_nz_cts_in),
       name=name,
       in_positional_semantics=transpose_in_positional_semantics,
-      out_positional_semantics=out_positional_semantics)
+      out_positional_semantics=out_positional_semantics,
+      is_gda=is_gda)
   return tree_unflatten(cts_out_treedef, nz_cts_out)
 ad.reducing_transposes[pjit_p] = _pjit_transpose
 
